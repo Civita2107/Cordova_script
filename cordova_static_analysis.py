@@ -208,16 +208,6 @@ def evaluate_vulnerabilities():
     if wildcard_access:
         vulns.append("Wildcard access origin (*) allows unrestricted external access")
 
-    # Add summary of security control status
-    security_summary = {
-        "csp_status": REPORT.get("index_csp", "unknown"),
-        "access_origin_status": REPORT.get("access_origin", "unknown"),
-        "has_permissive_access": permissive_access,
-        "has_wildcard_access": wildcard_access,
-        "security_controls_adequate": not security_weakness
-    }
-    REPORT["security_analysis_summary"] = security_summary
-
     REPORT["vulnerability_verdicts"] = vulns if vulns else ["No vulnerabilities detected"]
 
 def main():
