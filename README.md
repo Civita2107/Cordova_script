@@ -34,7 +34,7 @@ python cordova_static_analysis.py <app.apk>
 ## Output
 - Results are saved to static_analysis_report.json
 - The script also prints a summary to the console
-Example output snippet:
+  - Example output snippet:
 ```
 {
     "internet_permission": true,
