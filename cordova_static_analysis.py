@@ -37,11 +37,35 @@ def check_config(decoded_dir):
         REPORT["allow_navigation"] = "config.xml not found"
         REPORT["allow_intent"] = "config.xml not found"
         return
+
     try:
         with open(config_file, "r", encoding="utf-8") as f:
             content = f.read()
-            REPORT["allow_navigation"] = '<allow-navigation href="http://*"' in content
-            REPORT["allow_intent"] = '<allow-intent href="http://*"' in content
+
+        # Strip out XML comments so commented tags are ignored
+        content_no_comments = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
+
+        # Parse cleaned XML
+        root = ET.fromstring(content_no_comments)
+
+        # Namespace dictionary
+        ns = {"w": "http://www.w3.org/ns/widgets"}
+
+        # Look for allow-navigation and allow-intent
+        allow_navigation_tags = root.findall("w:allow-navigation", ns)
+        allow_intent_tags = root.findall("w:allow-intent", ns)
+
+        REPORT["allow_navigation"] = len(allow_navigation_tags) > 0
+        REPORT["allow_intent"] = len(allow_intent_tags) > 0
+
+        # (Optional) collect href values for more detailed reporting
+        REPORT["allow_navigation_details"] = [
+            tag.attrib.get("href") for tag in allow_navigation_tags
+        ]
+        REPORT["allow_intent_details"] = [
+            tag.attrib.get("href") for tag in allow_intent_tags
+        ]
+
     except Exception as e:
         REPORT["allow_navigation"] = f"Error: {e}"
         REPORT["allow_intent"] = f"Error: {e}"
@@ -59,10 +83,13 @@ def check_access_origin(decoded_dir):
     try:
         tree = ET.parse(config_file)
         root = tree.getroot()
-        
-        # Find all access tags
-        access_tags = root.findall("access")
-        
+
+        # Detect default namespace
+        ns = {"def": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
+
+        # Find all access tags (with namespace if present)
+        access_tags = root.findall(".//def:access", ns) if ns else root.findall(".//access")
+
         if not access_tags:
             REPORT["access_origin"] = "No access origin tags found"
             REPORT["access_origin_details"] = []
@@ -72,11 +99,11 @@ def check_access_origin(decoded_dir):
             access_origins = []
             for access in access_tags:
                 origin = access.attrib.get("origin", "")
-                launch_external = access.attrib.get("launch-external", "")
+                # launch_external = access.attrib.get("launch-external", "")
                 
                 access_info = {
                     "origin": origin,
-                    "launch_external": launch_external if launch_external else None
+                    # "launch_external": launch_external if launch_external else None
                 }
                 access_origins.append(access_info)
             
@@ -87,20 +114,20 @@ def check_access_origin(decoded_dir):
             wildcard_origins = [acc for acc in access_origins if acc["origin"] == "*"]
             REPORT["wildcard_access_origin"] = len(wildcard_origins) > 0
             
-            # Check for permissive access origins (alternative to CSP missing)
-            # Consider permissive if wildcard or multiple broad domains are allowed
+            # Check for permissive access origins
             permissive_patterns = ["*", "http://*", "https://*", "file://*"]
             permissive_origins = [acc for acc in access_origins 
                                 if acc["origin"] in permissive_patterns or 
                                    acc["origin"].startswith("http://") or 
                                    acc["origin"].startswith("https://")]
             REPORT["permissive_access_origin"] = len(permissive_origins) > 0
-            
+
     except Exception as e:
         REPORT["access_origin"] = f"Error parsing config.xml: {e}"
         REPORT["access_origin_details"] = []
         REPORT["wildcard_access_origin"] = False
         REPORT["permissive_access_origin"] = False
+
 
 def check_plugin_file(decoded_dir):
     plugin_path = os.path.join(decoded_dir, "assets/www/plugins/cordova-plugin-file")
@@ -115,7 +142,7 @@ def check_index_csp(decoded_dir):
     try:
         with open(index_file, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
-            # strip HTML comments
+            # Strip HTML comments
             content_no_comments = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
 
             # CSP check
@@ -168,7 +195,7 @@ def evaluate_vulnerabilities():
     # Security weakness indicator: CSP missing OR permissive access origin
     security_weakness = csp_missing or permissive_access
 
-    # 1. External Script Injection → File Plugin API
+    # External Script Injection - File Plugin API
     if security_weakness and internet and cordova_plugin_file and resolve_used:
         reason = []
         if csp_missing:
@@ -177,7 +204,7 @@ def evaluate_vulnerabilities():
             reason.append("permissive access origin configuration")
         vulns.append(f"External Script Injection accessing the Cordova File Plugin API (due to: {', '.join(reason)})")
 
-    # 2. External Script Injection → HTML files
+    # External Script Injection - HTML files
     if security_weakness and internet:
         reason = []
         if csp_missing:
@@ -186,7 +213,7 @@ def evaluate_vulnerabilities():
             reason.append("permissive access origin configuration")
         vulns.append(f"External Script Injection accessing the application HTML files (due to: {', '.join(reason)})")
 
-    # 3. Same-Origin Iframe → File Plugin API
+    # Same-Origin Iframe - File Plugin API
     if security_weakness and internet and cordova_plugin_file and resolve_used and allow_navigation:
         reason = []
         if csp_missing:
@@ -195,7 +222,7 @@ def evaluate_vulnerabilities():
             reason.append("permissive access origin configuration")
         vulns.append(f"Same-Origin Iframe loading of malicious files accessing the Cordova File Plugin API (due to: {', '.join(reason)})")
 
-    # 4. Same-Origin Iframe → HTML files
+    # Same-Origin Iframe - HTML files
     if security_weakness and internet and allow_navigation:
         reason = []
         if csp_missing:
@@ -218,6 +245,33 @@ def main():
     apk_file = sys.argv[1]
     decoded_dir = run_apktool(apk_file)
 
+    # Check if Cordova is there first
+    manifest_path = os.path.join(decoded_dir, "AndroidManifest.xml")
+    config_path = os.path.join(decoded_dir, "res/xml/config.xml")
+
+    cordova_found = False
+    for file_path in [manifest_path, config_path]:
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    if "cordova" in f.read().lower():
+                        cordova_found = True
+                        break
+            except Exception:
+                pass
+
+    if not cordova_found:
+        print("[!] No 'cordova' keyword found in AndroidManifest.xml or config.xml.")
+        print("[!] Skipping analysis.")
+        REPORT["cordova_detected"] = False
+        with open("static_analysis_report.json", "w", encoding="utf-8") as out:
+            json.dump(REPORT, out, indent=4)
+        sys.exit(0)
+
+    REPORT["cordova_detected"] = True
+    print("[+] Cordova keyword found — running full analysis...")
+
+    # Go on only if Cordova detected 
     check_manifest(decoded_dir)
     check_config(decoded_dir)
     check_access_origin(decoded_dir)
@@ -231,7 +285,7 @@ def main():
         json.dump(REPORT, out, indent=4)
 
     print("[+] Analysis complete. Results saved to static_analysis_report.json")
-    print(json.dumps(REPORT, indent=4))
+    print(json.dumps(REPORT, indent=4)) 
 
 if __name__ == "__main__":
     main()
