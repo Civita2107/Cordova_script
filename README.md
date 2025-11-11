@@ -8,6 +8,7 @@ It automatically decodes the APK using **apktool**, inspects key configuration f
 The tool checks for the following:
 - AndroidManifest.xml
   - Detects if the app requests the **INTERNET** permission
+  - Detects if the app is **debuggable**
 - config.xml
   - Flags **\<allow-navigation\>** with broad/wildcard patterns
   - Flags **\<allow-intent\>** with broad/wildcard patterns
@@ -37,7 +38,9 @@ python cordova_static_analysis.py <app.apk>
   - Example output snippet:
 ```
 {
+    "cordova_detected": true,
     "internet_permission": true,
+    "android_debuggable": false,
     "allow_navigation": false,
     "allow_intent": false,
     "access_origin": "No access origin tags found",
