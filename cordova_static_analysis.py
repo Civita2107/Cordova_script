@@ -10,7 +10,7 @@ REPORT = {}
 
 def run_apktool(apk_file, output_dir="apk_decoded"):
     if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)  
+        shutil.rmtree(output_dir)
     try:
         subprocess.run(["apktool", "d", apk_file, "-o", output_dir, "-f"], check=True)
         return output_dir
@@ -20,16 +20,33 @@ def run_apktool(apk_file, output_dir="apk_decoded"):
 
 def check_manifest(decoded_dir):
     manifest_file = os.path.join(decoded_dir, "AndroidManifest.xml")
+    # Define the Android XML namespace
+    android_ns = "{http://schemas.android.com/apk/res/android}"
+
     try:
         tree = ET.parse(manifest_file)
         root = tree.getroot()
+
+        # 1. Check for Internet Permission
         permissions = [
-            p.attrib.get("{http://schemas.android.com/apk/res/android}name")
+            p.attrib.get(f"{android_ns}name")
             for p in root.findall("uses-permission")
         ]
         REPORT["internet_permission"] = "android.permission.INTERNET" in permissions
+
+        # 2. Check if Debuggable
+        app_tag = root.find("application")
+        if app_tag is not None:
+            # Get the debuggable attribute, default to "false" if not found
+            debug_attr = app_tag.attrib.get(f"{android_ns}debuggable", "false")
+            REPORT["android_debuggable"] = (debug_attr.lower() == "true")
+        else:
+            REPORT["android_debuggable"] = "Error: <application> tag not found"
+
     except Exception as e:
         REPORT["internet_permission"] = f"Error parsing manifest: {e}"
+        REPORT["android_debuggable"] = f"Error parsing manifest: {e}"
+
 
 def check_config(decoded_dir):
     config_file = os.path.join(decoded_dir, "res/xml/config.xml")
@@ -43,12 +60,10 @@ def check_config(decoded_dir):
             content = f.read()
 
         # Strip out XML comments so commented tags are ignored
-        content_no_comments = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
+        content_no_comments = re.sub(r"", "", content, flags=re.DOTALL)
 
-        # Parse cleaned XML
         root = ET.fromstring(content_no_comments)
 
-        # Namespace dictionary
         ns = {"w": "http://www.w3.org/ns/widgets"}
 
         # Look for allow-navigation and allow-intent
@@ -58,7 +73,7 @@ def check_config(decoded_dir):
         REPORT["allow_navigation"] = len(allow_navigation_tags) > 0
         REPORT["allow_intent"] = len(allow_intent_tags) > 0
 
-        # (Optional) collect href values for more detailed reporting
+        # Collect href values for more detailed reporting
         REPORT["allow_navigation_details"] = [
             tag.attrib.get("href") for tag in allow_navigation_tags
         ]
@@ -79,7 +94,7 @@ def check_access_origin(decoded_dir):
         REPORT["wildcard_access_origin"] = False
         REPORT["permissive_access_origin"] = False
         return
-    
+
     try:
         tree = ET.parse(config_file)
         root = tree.getroot()
@@ -100,25 +115,25 @@ def check_access_origin(decoded_dir):
             for access in access_tags:
                 origin = access.attrib.get("origin", "")
                 # launch_external = access.attrib.get("launch-external", "")
-                
+
                 access_info = {
                     "origin": origin,
                     # "launch_external": launch_external if launch_external else None
                 }
                 access_origins.append(access_info)
-            
+
             REPORT["access_origin"] = f"{len(access_origins)} access origin tag(s) found"
             REPORT["access_origin_details"] = access_origins
-            
-            # Check for wildcard origins (security concern)
+
+            # Check for wildcard origins
             wildcard_origins = [acc for acc in access_origins if acc["origin"] == "*"]
             REPORT["wildcard_access_origin"] = len(wildcard_origins) > 0
-            
+
             # Check for permissive access origins
             permissive_patterns = ["*", "http://*", "https://*", "file://*"]
-            permissive_origins = [acc for acc in access_origins 
-                                if acc["origin"] in permissive_patterns or 
-                                   acc["origin"].startswith("http://") or 
+            permissive_origins = [acc for acc in access_origins
+                                if acc["origin"] in permissive_patterns or
+                                   acc["origin"].startswith("http://") or
                                    acc["origin"].startswith("https://")]
             REPORT["permissive_access_origin"] = len(permissive_origins) > 0
 
@@ -142,8 +157,8 @@ def check_index_csp(decoded_dir):
     try:
         with open(index_file, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
-            # Strip HTML comments
-            content_no_comments = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
+            # strip HTML comments
+            content_no_comments = re.sub(r"", "", content, flags=re.DOTALL)
 
             # CSP check
             if re.search(r'<meta[^>]+Content-Security-Policy', content_no_comments, re.IGNORECASE):
@@ -189,13 +204,14 @@ def evaluate_vulnerabilities():
     resolve_in_js = REPORT.get("resolveLocalFileSystemURL_js") not in [False, "js folder not found"]
     wildcard_access = REPORT.get("wildcard_access_origin") is True
     permissive_access = REPORT.get("permissive_access_origin") is True
+    is_debuggable = REPORT.get("android_debuggable") is True
 
     resolve_used = resolve_in_index or resolve_in_js
-    
+
     # Security weakness indicator: CSP missing OR permissive access origin
     security_weakness = csp_missing or permissive_access
 
-    # External Script Injection - File Plugin API
+    # 1. External Script Injection - File Plugin API
     if security_weakness and internet and cordova_plugin_file and resolve_used:
         reason = []
         if csp_missing:
@@ -204,7 +220,7 @@ def evaluate_vulnerabilities():
             reason.append("permissive access origin configuration")
         vulns.append(f"External Script Injection accessing the Cordova File Plugin API (due to: {', '.join(reason)})")
 
-    # External Script Injection - HTML files
+    # 2. External Script Injection - HTML files
     if security_weakness and internet:
         reason = []
         if csp_missing:
@@ -213,7 +229,7 @@ def evaluate_vulnerabilities():
             reason.append("permissive access origin configuration")
         vulns.append(f"External Script Injection accessing the application HTML files (due to: {', '.join(reason)})")
 
-    # Same-Origin Iframe - File Plugin API
+    # 3. Same-Origin Iframe - File Plugin API
     if security_weakness and internet and cordova_plugin_file and resolve_used and allow_navigation:
         reason = []
         if csp_missing:
@@ -222,7 +238,7 @@ def evaluate_vulnerabilities():
             reason.append("permissive access origin configuration")
         vulns.append(f"Same-Origin Iframe loading of malicious files accessing the Cordova File Plugin API (due to: {', '.join(reason)})")
 
-    # Same-Origin Iframe - HTML files
+    # 4. Same-Origin Iframe - HTML files
     if security_weakness and internet and allow_navigation:
         reason = []
         if csp_missing:
@@ -230,10 +246,16 @@ def evaluate_vulnerabilities():
         if permissive_access:
             reason.append("permissive access origin configuration")
         vulns.append(f"Same-Origin Iframe loading of malicious files accessing the application HTML files (due to: {', '.join(reason)})")
-
-    # 5. Wildcard access origin vulnerability (specific case)
+    # End vulnerabilities
+    
+    # Wildcard access origin vulnerability (specific case)
     if wildcard_access:
         vulns.append("Wildcard access origin (*) allows unrestricted external access")
+
+    # App is debuggable
+    if is_debuggable:
+        vulns.append("Application is debuggable (android:debuggable=\"true\"), exposing it to remote debugging and data theft")
+
 
     REPORT["vulnerability_verdicts"] = vulns if vulns else ["No vulnerabilities detected"]
 
@@ -245,7 +267,7 @@ def main():
     apk_file = sys.argv[1]
     decoded_dir = run_apktool(apk_file)
 
-    # Check if Cordova is there first
+    # Cordova check before scanning
     manifest_path = os.path.join(decoded_dir, "AndroidManifest.xml")
     config_path = os.path.join(decoded_dir, "res/xml/config.xml")
 
@@ -271,7 +293,7 @@ def main():
     REPORT["cordova_detected"] = True
     print("[+] Cordova keyword found — running full analysis...")
 
-    # Go on only if Cordova detected 
+    # Go on only if Cordova is detected
     check_manifest(decoded_dir)
     check_config(decoded_dir)
     check_access_origin(decoded_dir)
@@ -285,7 +307,7 @@ def main():
         json.dump(REPORT, out, indent=4)
 
     print("[+] Analysis complete. Results saved to static_analysis_report.json")
-    print(json.dumps(REPORT, indent=4)) 
+    print(json.dumps(REPORT, indent=4))
 
 if __name__ == "__main__":
     main()
